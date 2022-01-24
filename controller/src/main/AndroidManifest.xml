@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.lanlin.controller">
+    <application>
+        <provider
+            android:authorities="com.lanlin.controller.player.provider"
+            android:name=".player.provider.ControllerProvider"
+            android:enabled="true"
+            android:exported="false"/>
+    </application>
+
+</manifest>
