@@ -42,7 +42,6 @@ open class BinderPoolClient(context: Context,
             override fun onServiceDisconnected(name: ComponentName?) {
                 state = DISCONNECT_STATE
                 disconnected()
-                pool?.asBinder()?.unlinkToDeath(deathRecipient, flags)
                 pool = null
             }
 
