@@ -51,21 +51,28 @@ open class MusicController<T : Item>(val clazz: Class<*>, val itemTransformation
     private val dataSetChangeListener: IPCDataSetChangeListener by lazy {
         object : IPCDataSetChangeListener.Stub() {
             override fun onChange(source: MutableList<Wrapper>) {
-                if (source.isEmpty()) {
-                    currentItem.postValue(null)
-                    playItems.postValue(mutableListOf())
-                } else {
-                    val list = playItems.value ?: mutableListOf()
-                    source.forEach { w ->
-                        itemTransformation.transform(w)?.let {
-                            if (list.contains(it)) {
-                                list.remove(it)
-                            } else {
-                                list.add(it)
+                ExecutorInstance.getInstance().execute {
+                    if (client.isConnected()) {
+                        kotlin.runCatching {
+                            val data = kotlin.run {
+                                val d = dataController?.allItems() ?: mutableListOf()
+                                val items = mutableListOf<T>()
+                                d.forEach {
+                                    itemTransformation.transform(it)?.let {
+                                        items.add(it)
+                                    }
+                                }
+                                items
                             }
+                            if (data.isEmpty()) {
+                                currentItem.postValue(null)
+                            }
+                            playItems.postValue(data)
+                        }.onFailure {
+                            currentItem.postValue(null)
+                            playItems.postValue(mutableListOf())
                         }
                     }
-                    playItems.postValue(list)
                 }
             }
         }
