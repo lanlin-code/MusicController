@@ -13,7 +13,7 @@ allprojects {
 
 ```kotlin
 dependencies {
-	implementation 'com.github.lanlin-code:MusicController:1.0.4'
+	implementation 'com.github.lanlin-code:MusicController:1.0.5'
 }
 ```
 
