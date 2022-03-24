@@ -17,6 +17,9 @@ dependencies {
 }
 ```
 
+## 2.0.0版本的新特性
+由于之前版本直接在服务中直接进行配置参数，而导致服务看起来非常臃肿，在2.0.0版本中，废弃了服务中的参数配置，新增了`PlaySetting`类，用来配置一些音乐服务所需的参数，如`ItemTransformation`,`IWrapperTransformation`等。此外，为了更好的拓展性，重构了一系列关键接口，通过对`PlayerSetting`配置，不仅支持原生`MediaPlayer`,还支持使用者自定义自己的Player。
+
 
 
 ## 使用
