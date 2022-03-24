@@ -5,31 +5,25 @@ import android.content.Intent
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import com.lanlin.controller.IPCDataController
 import com.lanlin.controller.IPCPlayerController
 import com.lanlin.controller.data.Item
 import com.lanlin.controller.data.Wrapper
 import com.lanlin.controller.player.abs.ErrorHandler
 import com.lanlin.controller.player.abs.Loader
-import com.lanlin.controller.player.abs.cache.CacheStrategy
 import com.lanlin.controller.player.abs.core.MusicPlayer
 import com.lanlin.controller.player.abs.core.Position
 import com.lanlin.controller.player.abs.listener.*
-import com.lanlin.controller.player.abs.transformation.IWrapperTransformation
-import com.lanlin.controller.player.abs.transformation.ItemTransformation
-import com.lanlin.controller.player.impl.DataInterceptor
 import com.lanlin.controller.player.impl.MediaListenerMangerImpl
-import com.lanlin.controller.player.impl.OperatorCallback
 import com.lanlin.controller.player.impl.controller.MediaControllerImpl
 import com.lanlin.controller.player.impl.controller.ModeControllerImpl
-import com.lanlin.controller.player.impl.core.MusicPlayerImpl
+import com.lanlin.controller.player.impl.core.DefaultMusicPlayer
 import com.lanlin.controller.player.impl.ipc.*
 import com.lanlin.controller.player.impl.position.InitPosition
 import com.lanlin.controller.player.setting.ErrorSetting
 import com.lanlin.controller.player.setting.MediaModeSetting
-import com.lanlin.controller.player.util.DataSource
-import com.lanlin.controller.player.util.cast
-import com.lanlin.controller.player.util.castAs
-import com.lanlin.controller.player.util.ensureSecurity
+import com.lanlin.controller.player.setting.PlayerSetting
+import com.lanlin.controller.player.util.*
 import java.lang.ref.WeakReference
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -38,24 +32,13 @@ abstract class MediaService<T : Item> : Service(), Loader {
         Handler(Looper.getMainLooper())
     }
 
-    protected val errorSetting by lazy {
-        errorSetting()
-    }
 
     protected val pool by lazy {
         BinderPool()
     }
 
-    protected val cacheStrategy: CacheStrategy? by lazy {
-        cacheStrategy()
-    }
-
-    protected val itemTransformation by lazy {
-        transformation()
-    }
-
-    protected val wrapperTransformation by lazy {
-        wrapperTransformation()
+    protected val setting by lazy {
+        providePlayerSetting()
     }
 
 
@@ -64,6 +47,10 @@ abstract class MediaService<T : Item> : Service(), Loader {
         initMediaModeSetting()
         initIPC()
     }
+
+    protected abstract fun providePlayerSetting(): PlayerSetting<T>
+
+
 
     /**
      * 初始化播放模式
@@ -87,23 +74,23 @@ abstract class MediaService<T : Item> : Service(), Loader {
         val wrappers = DataSource<Wrapper>(list = CopyOnWriteArrayList())
         
         position.max = dataSource.size
-        val interceptor = dataInterceptor()
+        val interceptor = setting.dataInterceptor
         return if (interceptor == null) {
             IPCDataControllerImpl(
                 handler = mainHandler,
                 source = wrappers,
                 mediaSource = dataSource,
                 position = position,
-                transformation = itemTransformation,
-                operatorCallback = operatorCallback())
+                transformation = setting.itemTransformation,
+                operatorCallback = setting.operatorCallback)
         } else {
             IPCDataControllerImpl(
                 handler = mainHandler,
                 source = wrappers,
                 mediaSource = dataSource,
                 position = position,
-                transformation = itemTransformation,
-                operatorCallback = operatorCallback(),
+                transformation = setting.itemTransformation,
+                operatorCallback = setting.operatorCallback,
                 interceptor = interceptor)
         }
     }
@@ -114,28 +101,42 @@ abstract class MediaService<T : Item> : Service(), Loader {
      * @param position 初始化MediaController要用到的位置信息
      * 初始化IPCPlayerController
      */
-    private fun initPlayerController(callback: Loader.Callback<Item>,
-                                     source: MutableList<T>,
+    private fun initPlayerController(source: MutableList<T>,
                                      position: Position
-    ): IPCPlayerControllerImpl {
-        val player = MusicPlayerImpl()
+    ): IPCPlayerControllerImpl<T> {
+        val player = setting.basePlayer ?: DefaultMusicPlayer()
         val listenerManger = MediaListenerMangerImpl()
-        val mediaController = MediaControllerImpl(
+        val mediaController = setting.player ?: MediaControllerImpl(
             player = player,
             position = position,
             listenerManger = listenerManger,
             loader = WeakReference(this),
             handler = mainHandler,
             list = source,
-            itemCallback = callback,
-            cacheStrategy = cacheStrategy
+            cacheStrategy = setting.cacheStrategy
         )
+        val config = setting.errorSetting
+        val errorSetting = if (config == null) {
+            ErrorSetting(handler = object : ErrorHandler<T> {
+                override fun onError(value: T) {
+                    showForeground(value, false)
+                }
+            })
+        } else {
+            ErrorSetting(config.retryCount, handler = object : ErrorHandler<T> {
+                override fun onError(value: T) {
+                    showForeground(value, false)
+                    config.handler.onError(value)
+                }
+
+            }, config.record)
+        }
+        setting.errorSetting = config
         player.completeListener = object : MusicPlayer.CompleteListener {
             override fun completed() {
                 mainHandler.post {
                     ensureSecurity(source, mediaController.position) {
-                        mediaController.completeListener?.onComplete(
-                            source[mediaController.position.current()])
+                        mediaController.completeListener?.completed()
                     }
                     mediaController.listenerManger.invokeChangeListener(false, PlayStateFilter)
                     mediaController.next()
@@ -147,40 +148,20 @@ abstract class MediaService<T : Item> : Service(), Loader {
                 mainHandler.post {
                     ensureSecurity(source, mediaController.position) {
                         mediaController.listenerManger.invokeChangeListener(true, PlayStateFilter)
-                        mediaController.preparedListener?.onPrepared(
-                            source[mediaController.position.current()])
+                        mediaController.preparedListener?.prepared()
                     }
                 }
             }
 
         }
-
-        player.errorListener = object : MusicPlayer.ErrorListener {
-            override fun onError(what: Int, extra: Int) {
-                mainHandler.post {
-                    ensureSecurity(source, mediaController.position) {
-                        val value = source[mediaController.position.current()]
-                        val count = errorSetting.errorCount(value)
-                        mediaController.listenerManger.invokeChangeListener(false, PlayStateFilter)
-                        if (mediaController.errorListener?.onError(value) == false) {
-                            player.reset()
-                            if (count >= errorSetting.retryCount) {
-                                errorSetting.handler.onError(value)
-                            } else {
-                                errorSetting.record[value] = count + 1
-                                mediaController.playOrPause()
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        mediaController.errorListener = object : ErrorListener<T> {
-            override fun onError(value: T): Boolean {
+        player.errorListener = object : MusicPlayer.ErrorListener<String> {
+            override fun onError(player: MusicPlayer<String>, what: Int, extra: Int): Boolean {
                 ensureSecurity(source, mediaController.position) {
-                    if (source[position.current()] == value) {
+                    val value = source[mediaController.position.current()]
+                    val count = errorSetting.errorCount(value)
+                    mediaController.listenerManger.invokeChangeListener(false, PlayStateFilter)
+                    if (mediaController.errorListener?.onError(mediaController, what, extra) != true) {
                         player.reset()
-                        val count = errorSetting.errorCount(value)
                         if (count >= errorSetting.retryCount) {
                             errorSetting.handler.onError(value)
                         } else {
@@ -191,7 +172,6 @@ abstract class MediaService<T : Item> : Service(), Loader {
                 }
                 return true
             }
-
         }
 
         return IPCPlayerControllerImpl(realController = mediaController, handler = mainHandler)
@@ -205,6 +185,47 @@ abstract class MediaService<T : Item> : Service(), Loader {
         return MediaModeSetting.getInstance().getFirstMode()
     }
 
+    private fun initIPCModeController(): IPCModeControllerImpl {
+        return IPCModeControllerImpl(handler = mainHandler,
+            realController = ModeControllerImpl(current = loadInitMode())
+        )
+    }
+
+    private fun initIPCListenerController(): IPCListenerControllerImpl {
+        return IPCListenerControllerImpl()
+    }
+
+    override fun onLoadItem(itemIndex: Int, item: Item) {
+        ExecutorInstance.getInstance().execute {
+            val newItem = loadItem(itemIndex, item)
+            handleData(itemIndex, item, newItem)
+        }
+    }
+
+    protected abstract fun loadItem(itemIndex: Int, item: Item): Item
+
+    protected open fun handleData(itemIndex: Int, oldItem: Item, newItem: Item) {
+        mainHandler.post {
+            val dataController = IPCDataController.Stub.asInterface(
+                pool.queryBinder(BinderPool.DATA_CONTROL_BINDER))?.castAs<IPCDataControllerImpl<T>>()!!
+            val playerController = IPCPlayerController.Stub.asInterface(pool.queryBinder(
+                BinderPool.PLAYER_CONTROL_BINDER))?.castAs<IPCPlayerControllerImpl<T>>()!!
+            val source = dataController.source
+            val mediaSource = dataController.mediaSource
+            for (i in 0 until mediaSource.size) {
+                if (oldItem == mediaSource[i]) {
+                    mediaSource[i] = newItem.cast()!!
+                    source[i] = setting.wrapperTransformation.transform(mediaSource[i])!!
+                    break
+                }
+            }
+            val cur = playerController.realController.position.current()
+            if (mediaSource[cur] == newItem && !playerController.isPlaying) {
+                playerController.realController.setDataSource(mediaSource[cur])
+            }
+
+        }
+    }
 
     /**
      * 初始化IPC服务(包括[IPCModeControllerImpl], [IPCDataControllerImpl],
@@ -212,44 +233,27 @@ abstract class MediaService<T : Item> : Service(), Loader {
      * 并将这些服务放入[BinderPool]中
      */
     open fun initIPC() {
-        val modeController = IPCModeControllerImpl(handler = mainHandler,
-            realController = ModeControllerImpl(current = loadInitMode())
-        )
+        val modeController = initIPCModeController()
+        pool.map[BinderPool.MODE_CONTROL_BINDER] = modeController
+
 
         val dataController = initDataController(
-            MediaModeSetting.getInstance().getPosition(modeController.realController.current)!!)
+            MediaModeSetting.getInstance().getPosition(modeController.currentMode())!!)
+        pool.map[BinderPool.DATA_CONTROL_BINDER] = dataController
         val source = dataController.source
 
-        val callback = object : Loader.Callback<Item> {
-            override fun callback(itemIndex: Int, value: Item) {
-                val wrapper = source[itemIndex]
-                if (value == itemTransformation.transform(wrapper)) {
-                    wrapperTransformation.transform(value.cast()!!)?.let {
-                        source[itemIndex] = it
-                    }
-                } else {
-                    for (i in 0 until source.size) {
-                        val w = source[i]
-                        if (value == itemTransformation.transform(w)) {
-                            wrapperTransformation.transform(value.cast()!!)?.let {
-                                source[i] = it
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        val playerController = initPlayerController(callback = callback,
+        val playerController = initPlayerController(
             source = dataController.mediaSource,
             position = dataController.position)
+        pool.map[BinderPool.PLAYER_CONTROL_BINDER] = playerController
         val realController = playerController.realController.castAs<MediaControllerImpl<T>>()!!
 
-        val listenerController = IPCListenerControllerImpl()
+        val listenerController = initIPCListenerController()
+        pool.map[BinderPool.LISTENER_CONTROL_BINDER] = listenerController
 
         source.removeListeners.add(object : DataSource.RemoveListener<Wrapper> {
             override fun onRemoved(element: Wrapper, index: Int) {
-                realController.position.max = source.size;
+                realController.position.max = source.size
                 if (realController.position.current() == index) {
                     if (realController.isPlaying()) {
                         realController.playOrPause()
@@ -260,8 +264,8 @@ abstract class MediaService<T : Item> : Service(), Loader {
                         realController.reset()
                     }
                 }
-                itemTransformation.transform(element)?.let {
-                    errorSetting.remove(it)
+                setting.itemTransformation.transform(element)?.let {
+                    setting.errorSetting?.remove(it)
                 }
             }
 
@@ -273,7 +277,7 @@ abstract class MediaService<T : Item> : Service(), Loader {
 
                 if (changes.isEmpty()) {
                     realController.position.with(InitPosition)
-                    errorSetting.record.clear()
+                    setting.errorSetting?.record?.clear()
                     if (realController.isPlaying()) {
                         realController.playOrPause()
                         realController.reset()
@@ -281,15 +285,15 @@ abstract class MediaService<T : Item> : Service(), Loader {
                 } else {
                     realController.position.max = source.size
                     changes.forEach {
-                        itemTransformation.transform(it)?.let { item ->
-                            errorSetting.remove(item)
+                        setting.itemTransformation.transform(it)?.let { item ->
+                            setting.errorSetting?.remove(item)
                         }
                     }
                 }
             }
         })
 
-        (modeController.realController as ModeControllerImpl).
+        (modeController.realController).
         listenerManager.registerChangeListener(object : ModeStateChangeListener {
             override fun onChange(value: Int) {
                 val position = realController.position
@@ -303,7 +307,7 @@ abstract class MediaService<T : Item> : Service(), Loader {
         realController.listenerManger.registerChangeListener(object : ItemChangeListener {
             override fun onChange(value: Item) {
                 for(i in 0 until source.size) {
-                    val v = itemTransformation.transform(source[i])
+                    val v = setting.itemTransformation.transform(source[i])
                     if (value == v) {
                         listenerController.invokeItemChangeListener(source[i])
                         showForeground(v, realController.isPlaying())
@@ -317,27 +321,18 @@ abstract class MediaService<T : Item> : Service(), Loader {
                 listenerController.invokePlayStateChangeListener(value)
                 val p = realController.position.current()
                 if (source.isNotEmpty() && p < source.size) {
-                    showForeground(itemTransformation.transform(
+                    showForeground(setting.itemTransformation.transform(
                         source[realController.position.current()])!!,
                         realController.isPlaying())
                 }
             }
         })
 
-        pool.map[BinderPool.DATA_CONTROL_BINDER] = dataController
-        pool.map[BinderPool.LISTENER_CONTROL_BINDER] = listenerController
-        pool.map[BinderPool.MODE_CONTROL_BINDER] = modeController
-        pool.map[BinderPool.PLAYER_CONTROL_BINDER] = playerController
-
-
     }
 
     override fun onBind(intent: Intent?): IBinder? {
         return pool
     }
-
-
-    protected open fun operatorCallback(): OperatorCallback? = null
 
 
     /**
@@ -364,38 +359,11 @@ abstract class MediaService<T : Item> : Service(), Loader {
 
 
 
-    /**
-     * 初始化缓存策略，默认为null
-     */
-    protected open fun cacheStrategy(): CacheStrategy? {
-        return null
-    }
-
-    /**
-     * 初始化错误处理设置
-     */
-    protected open fun errorSetting(): ErrorSetting<T> {
-        return ErrorSetting(handler = object : ErrorHandler<T> {
-            override fun onError(value: T) {
-                reportPlayError(value)
-            }
-        })
-    }
-
-    /**
-     * 数据拦截器
-     */
-    protected open fun dataInterceptor(): DataInterceptor<T>? = null
-
-    protected abstract fun transformation(): ItemTransformation<T>
-
-    protected abstract fun wrapperTransformation(): IWrapperTransformation<T>
-
     override fun onDestroy() {
         mainHandler.removeCallbacksAndMessages(null)
         (IPCPlayerController.Stub.asInterface(
             pool.queryBinder(BinderPool.PLAYER_CONTROL_BINDER)
-        ) as? IPCPlayerControllerImpl)?.realController?.release()
+        ) as? IPCPlayerControllerImpl<*>)?.realController?.release()
         super.onDestroy()
     }
 
