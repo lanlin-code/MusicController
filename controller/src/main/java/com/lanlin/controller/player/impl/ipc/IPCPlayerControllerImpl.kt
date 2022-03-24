@@ -3,10 +3,11 @@ package com.lanlin.controller.player.impl.ipc
 import android.os.Handler
 import android.os.Looper
 import com.lanlin.controller.IPCPlayerController
+import com.lanlin.controller.data.Item
 import com.lanlin.controller.player.abs.controller.MediaController
 
-class IPCPlayerControllerImpl(
-    val realController: MediaController,
+class IPCPlayerControllerImpl<T : Item>(
+    val realController: MediaController<T>,
     val handler: Handler = Handler(Looper.getMainLooper())
 ) : IPCPlayerController.Stub() {
 
